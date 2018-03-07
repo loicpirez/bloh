@@ -1,0 +1,355 @@
+#!/usr/bin/env node
+
+var crypto = require('crypto');
+var request = require('request');
+var fs = require('fs');
+var prompt = require('prompt');
+var program = require('commander');
+var path = require('path');
+
+
+/*
+ * Send the request with the given arguments
+ * signed_json is the return of createRequest
+ * verb is the http verb, path is the uri path
+ * callback is the function who handle the data
+ */
+
+sendRequest = function (signed_json, verb, path, callback) {
+
+	if (verb !== 'GET' && verb !== 'POST' && verb !== 'DELETE')
+		return (console.error('Wrong HTTP VERB'));
+
+	if (path.substring(0,12) !== 'repositories' && path.substring(0,6) !== 'sshkey')
+		return (console.error('Wrong PATH request'));
+
+	var options = {
+		uri: "https://blih.epitech.eu/user/" + path,
+		method: verb,
+		json: signed_json
+	};
+
+	return (request(options, function (error, response, body) {
+		callback(body);
+	}));
+}
+
+/*
+ * takes in parameter your UNIX password
+ * send back a sha512 hash of it
+ */
+
+createToken = function(passwordUnix) {
+
+	var token = crypto.createHash('sha512');
+	token.update(passwordUnix, 'utf8');
+	return (token.digest('hex'));
+}
+
+/*
+ * Create and sign the data needed by sendRequest
+ * userData is the name and the sha512 created by createToken
+ * postData is the data needed only if it's a POST request
+ * callback is the function passed to sendRequest, that handle the data
+ */
+
+createRequest = function(userData, argData, postData, callback) {
+
+	var signedData = {
+		user: "",
+		signature: ""
+	}
+
+	signedData.user = userData.username;
+	var hashMac = crypto.createHmac('sha512', userData.password);
+	hashMac.update(userData.username);
+	if (postData == undefined) {
+		signedData.signature = hashMac.digest('hex').toString();
+	}
+	else {
+		var postDataInString = JSON.stringify(postData, null, 4);
+		hashMac.update(postDataInString);
+		signedData.data = postData;
+		signedData.signature = hashMac.digest('hex').toString();
+	}
+	return (sendRequest(signedData, argData.verb, argData.path, callback));
+};
+
+
+/*
+ * takes in parameter the callback needed to handle the data requested
+ * Prompt the user with adequate parameter for their login and UNIX password
+ * then send the data in order to create the Request
+ * Also, it write the login and the sha512 hash of the password in a file
+ */
+
+var getPrompt = function(pathData, postData, callback, login) {
+
+	var properties = [{
+		name: "username",
+		validator: /^(([^<>()\[\]\\.,;:\s@"]+(\.[^<>()\[\]\\.,;:\s@"]+)*)|(".+"))@((\[[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}])|(([a-zA-Z\-0-9]+\.)+[a-zA-Z]{2,}))$/,
+		warning: "Username must be your login"
+	},
+	{
+		name: "password",
+		validator: /......../,
+		warning: "must be your UNIX password",
+		hidden: true
+	}
+	];
+
+	prompt.get(properties, function (err, result) {
+		if (err)
+			return (console.error(err));
+		result.password = createToken(result.password);
+		if (login){
+			return (fs.writeFile(path.resolve(__dirname, '.bloh.json'), JSON.stringify(result, null, 4),function(err) {
+				if (err)
+					return (console.error(err));
+				else {
+					console.log('Credentials saved to ./bloh.json');
+					return (createRequest(result, pathData, postData, callback));
+				}
+			}));
+		}
+		else {
+			return (createRequest(result, pathData, postData, callback));
+		}
+	});
+}
+
+
+/*
+ * Check if the file exist
+ * if it exist, read it, validate the data and create the request
+ * if not, prompt the user for credentials
+ * the callback is the function that handle the data send back when the request
+ * is completed.
+ * also delete the file if it's not valid
+ */
+
+var createFile = function(pathData, postData, callback, nologin){
+
+	var userData;
+	var response;
+	var buff;
+
+	fs.open(path.resolve(__dirname, '.bloh.json'), 'ax+', function(err, fd) {
+		if (err) {
+			return (fs.readFile(path.resolve(__dirname, '.bloh.json'), function (err, data) {
+				if (err){
+					return (console.error(err));
+				}
+				if (data.toString().length == 0) {
+					fs.unlinkSync(path.resolve(__dirname, '.bloh.json'));
+					return (console.error("ERROR: incorrect JSON file deleted"));
+				}
+				if (((userData = JSON.parse(data)) !== undefined) &&
+						(userData.hasOwnProperty('username') &&
+						 userData.hasOwnProperty('password')))
+					return (createRequest(userData,
+								pathData,
+								postData,
+								callback));
+				else {
+					console.error('ERROR: incorrect JSON, deleting...');
+					fs.unlinkSync(path.resolve(__dirname, '.bloh.json'));
+					prompt.start();
+					response = getPrompt(pathData, postData, callback, nologin);
+					return (response);
+				}
+			}));
+		} else {
+			prompt.start();
+			response = getPrompt(pathData, postData, callback, nologin);
+		}
+		return (response);
+	});
+}
+
+/*
+ * basic call to the function that will start all the process,
+ * and output all the body of the request
+ */
+
+var blihCli = function() {
+
+	var callback;
+
+	program
+		.version('0.9.2')
+		.usage('commands [args...] [options] ')
+		.option('-n, --nologin', 'Don\'t save credentials');
+
+	program
+		.command('list')
+		.description('list repositories')
+		.action(function(){
+			if (program.nologin == true) {
+				callback = getPrompt;
+			} else {
+				callback = createFile;
+			}
+			callback({verb: "GET", path: "repositories"},
+					undefined,
+					function(data){
+						for (key in data.repositories)
+							console.log(key);
+					},
+					!program.nologin)
+		})
+
+	program
+		.command('listkeys')
+		.description('list ssh keys')
+		.action(function(){
+			if (program.nologin == true) {
+				callback = getPrompt;
+			} else {
+				callback = createFile;
+			}
+			callback({verb: "GET", path: "sshkey"},
+					undefined,
+					function(data){
+						for (key in data)
+							console.log(key + ':');
+						console.log(data[key]);
+					},
+					!program.nologin)
+		});
+
+	program
+		.command('create <repo>')
+		.description('create the repo with the given name')
+		.action(function(repo){
+			if (program.nologin == true) {
+				callback = getPrompt;
+			} else {
+				callback = createFile;
+			}
+			callback({verb: "POST", path: "repositories"},
+					{name: repo, type: "git"},
+					function(data){
+						for (key in data)
+							console.log(data[key]);
+					},
+					!program.nologin)
+		});
+
+	program
+		.command('setacl <repository> <user> <acl>')
+		.description('set acl rights on given repository for the given user')
+		.action(function(repository, username, rights){
+			if (program.nologin == true) {
+				callback = getPrompt;
+			} else {
+				callback = createFile;
+			}
+			callback({verb: "POST", path: "repositories/" + repository + "/acl"},
+					{acl: rights, user: username},
+					function(data){
+						for (key in data)
+							console.log(data[key]);
+					},
+					!program.nologin)
+		});
+
+	program
+		.command('getacl <repositories>')
+		.description('get the acl rights for the given repository')
+		.action(function(repositories){
+			if (program.nologin == true) {
+				callback = getPrompt;
+			} else {
+				callback = createFile;
+			}
+			callback({verb: "GET", path: "repositories/" + repositories + "/acl"},
+					undefined,
+					function(data){
+						for (key in data)
+							console.log(key + ": " + data[key]);
+					},
+					!program.nologin)
+		});
+
+	program
+		.command('delete <repository>')
+		.description('delete the given repository')
+		.action(function(repository){
+			if (program.nologin == true) {
+				callback = getPrompt;
+			} else {
+				callback = createFile;
+			}
+			getPrompt({verb: "DELETE", path: "repositories/" + repository},
+					undefined,
+					function(data){
+						for (key in data)
+							console.log(data[key]);
+					},
+					true)
+		});
+
+	program
+		.command('info <repository>')
+		.description('output some info on the repository')
+		.action(function(repository){
+			if (program.nologin == true) {
+				callback = getPrompt;
+			} else {
+				callback = createFile;
+			}
+			callback({verb: "GET", path: "repositories/" + repository},
+					undefined,
+					function(data){
+						for (key in data)
+							console.log(data[key]);
+					},
+					!program.nologin)
+		});
+
+	program
+		.command('deletekey <keyId>')
+		.description('delete the key with the given ID')
+		.action(function(keyId){
+			if (program.nologin == true) {
+				callback = getPrompt;
+			} else {
+				callback = createFile;
+			}
+			getPrompt({verb: "DELETE", path: "sshkey/" + keyId},
+					undefined,
+					function(data){
+						for (key in data)
+							console.log(data[key]);
+					},
+					true)
+		});
+
+	program
+		.command('upload <keyfile>')
+		.description('upload your ssh public key')
+		.action(function(keyfile){
+			if (program.nologin == true) {
+				callback = getPrompt;
+			} else {
+				callback = createFile;
+			}
+			var key = fs.readFileSync(keyfile).toString().replace(/\n/g, "");
+			callback({verb: "POST", path: "sshkey"},
+					{sshkey: key},
+					function(resp){
+						for (key in resp)
+							console.log(resp[key]);
+					},
+					!program.noLogin)
+		});
+
+	program.parse(process.argv);
+
+	if (process.argv.length <= 2)
+		program.help();
+
+};
+
+blihCli();
